@@ -278,7 +278,6 @@ class GroundElevation(Transform):
         if xy_grid is not None:
             assert xy_grid > 0
         assert model in ['ransac', 'knn', 'mlp']
-
         self.z_threshold = z_threshold
         self.verticality_threshold = verticality_threshold
         self.xy_grid = xy_grid
@@ -290,18 +289,18 @@ class GroundElevation(Transform):
         # Recover the point positions
         pos = data.pos
 
-        # Initialize a mask for the filtering out as many non-ground
-        # points as possible, to facilitate the subsequent search of the
-        # ground surface in the point cloud
-        mask = torch.ones(data.num_points, device=pos.device, dtype=torch.bool)
+        # Filter out Z-coordinate outliers before ground detection
+        z = pos[:, 2]
+        q1 = torch.quantile(z, 0.01)
+        z_mask = z >= q1
 
         # TODO: test all combinations on multiple devices
         # TODO: integrate voxelization as filtering
 
         # See `filter_by_z_distance_of_global_min` for more details
         if self.z_threshold is not None:
-            mask = mask & filter_by_z_distance_of_global_min(
-                pos, self.z_threshold)
+            mask = filter_by_z_distance_of_global_min(
+                pos[z_mask], self.z_threshold)
 
         # See `filter_by_verticality` for more details
         if self.verticality_threshold and (0 < self.verticality_threshold < 1):
@@ -320,7 +319,7 @@ class GroundElevation(Transform):
         # Trim the point cloud based on the computed filters. We hope
         # that there are mostly ground points in there, but can't be
         # 100% sure
-        pos_trimmed = pos[mask]
+        pos_trimmed = pos[z_mask][mask]
 
         # Fit a model to the trimmed points
         if self.model == 'ransac':

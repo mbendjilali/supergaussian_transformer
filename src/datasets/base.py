@@ -192,7 +192,7 @@ class BaseDataset(InMemoryDataset):
         self._segment_save_keys = segment_save_keys
         self._segment_no_save_keys = segment_no_save_keys
         self._segment_load_keys = segment_load_keys
-
+        self.raw_file_names_3d_dict = None
         if in_memory:
             log.warning(
                 "'in_memory' was set to True. This means the entire dataset "
@@ -522,7 +522,12 @@ class BaseDataset(InMemoryDataset):
         in case `self.raw_file_names` would need to be extended (e.g.
         with 3D bounding boxes files).
         """
-        return [self.id_to_relative_raw_path(x) for x in self.cloud_ids]
+        if self.raw_file_names_3d_dict is None:
+            self.raw_file_names_3d_dict = {
+                stage: [self.id_to_relative_raw_path(x) for x in self.all_cloud_ids[stage]]
+                for stage in self.all_cloud_ids.keys()
+            }
+        return self.raw_file_names_3d_dict
 
     def id_to_relative_raw_path(self, id: str) -> str:
         """Given a cloud id as stored in `self.cloud_ids`, return the

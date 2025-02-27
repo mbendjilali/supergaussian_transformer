@@ -75,6 +75,34 @@ class Cluster(CSRData):
         out[self.points] = cluster_idx.repeat_interleave(self.sizes)
         return out
 
+
+    @classmethod
+    def from_super_index(cls, super_index: torch.Tensor) -> 'Cluster':
+        """Creates a Cluster from a super_index tensor.
+        
+        :param super_index: torch.Tensor
+            A tensor where each entry maps a point to its cluster index
+        :return: Cluster
+            A new Cluster object representing the same clustering
+        """
+        device = super_index.device
+        num_clusters = super_index.max() + 1
+        
+        # Sort points by cluster for CSR format
+        points = torch.arange(len(super_index), device=device)
+        sorted_idx = torch.argsort(super_index)
+        points = points[sorted_idx]
+        
+        # Create pointers tensor marking start of each cluster
+        sizes = torch.bincount(super_index, minlength=num_clusters)
+        pointers = torch.cat([
+            torch.zeros(1, dtype=torch.long, device=device),
+            sizes.cumsum(0)
+        ])
+        
+        return cls(pointers, points)
+
+
     def select(
             self,
             idx: Union[int, List[int], torch.Tensor, np.ndarray],

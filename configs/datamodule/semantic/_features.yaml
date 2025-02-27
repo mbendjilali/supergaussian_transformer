@@ -3,7 +3,7 @@
 # Mandatory list of handcrafted features for points, segments and edges
 # that will be used for partition and training. The rest of the config
 # will use these to interpolate other important values
-partition_hf: ???  # point features used for the partition
+# partition_hf: ???  # point features used for the partition
 point_hf: ???  # point features used for training
 segment_base_hf: ???   # segment-wise features computed at preprocessing
 segment_mean_hf: ???  # segment features computed as the mean of point feature in each segment, saved with "mean_" prefix
@@ -41,7 +41,7 @@ segment_hf: ${eval:'${datamodule.segment_base_hf} + ["mean_" + x for x in ${data
 # will actually be loaded at train time. Use 'lite_preprocessing' to
 # choose to only preprocess the strictly-required features if you do not
 # intend to experiment with handcrafted feature combinations a lot
-point_hf_preprocess: ${eval:'list(set( ${datamodule.partition_hf} + ${datamodule.point_hf} + ${datamodule.segment_mean_hf} + ${datamodule.segment_std_hf} + ${datamodule.extra_point_hf} )) if ${datamodule.lite_preprocessing} else None'}
+point_hf_preprocess: ${eval:'list(set(${datamodule.point_hf} + ${datamodule.segment_mean_hf} + ${datamodule.segment_std_hf} + ${datamodule.extra_point_hf} )) if ${datamodule.lite_preprocessing} else None'}
 segment_base_hf_preprocess: ${eval:'list(set( ${datamodule.segment_base_hf} + ${datamodule.extra_segment_hf} )) if ${datamodule.lite_preprocessing} else None'}
 segment_mean_hf_preprocess: ${eval:'${datamodule.segment_mean_hf} if ${datamodule.lite_preprocessing} else None'}
 segment_std_hf_preprocess: ${eval:'${datamodule.segment_std_hf} if ${datamodule.lite_preprocessing} else None'}
@@ -87,6 +87,8 @@ feat_size:
     elevation: 1
     size: 1
     intensity: 1
+    pi: 1  # GMM mixture weight
+    sigma: 6  # GMM covariance diagonal
 
     log_pos: 3
     log_pos_room: 3
@@ -147,6 +149,7 @@ feat_size:
     mean_off: 3
     std_off: 3
     mean_dist: 1
+    wasser_dist: 1
     angle_source: 1
     angle_target: 1
     centroid_dir: 3

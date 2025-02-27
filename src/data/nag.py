@@ -60,7 +60,7 @@ class NAG:
         else:
             sub_sizes = self[low + 1].sub.sizes
         for i in range(low + 1, high):
-            sub_sizes = scatter_sum(sub_sizes, self[i].super_index, dim=0)
+            sub_sizes = scatter_sum(self[i].node_size, self[i].super_index, dim=0)
         return sub_sizes
 
     def get_super_index(

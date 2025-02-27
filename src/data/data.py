@@ -443,9 +443,7 @@ class Data(PyGData):
         return isolated_nodes(edge_index, num_nodes=self.num_nodes)
 
     def connect_isolated(self, k: int = 1) -> 'Data':
-        """Search for nodes with no edges in the graph and connect them
-        to their k nearest neighbors. Update self.edge_index and
-        self.edge_attr accordingly.
+        """Connect isolated nodes to their k nearest neighbors.
 
         Will raise an error if self has no edges or no pos.
 
@@ -465,18 +463,47 @@ class Data(PyGData):
         if not is_isolated.any():
             return self
 
-        # Search the nearest nodes for isolated nodes, among all nodes
-        # NB: we remove the nodes themselves from their own neighborhood
+        # Ensure we have at least k+1 points total for knn search
+        num_points = self.pos.shape[0]
+        if num_points <= k + 1:
+            k = max(1, num_points - 1)  # Ensure at least 1 neighbor
+
+        # Compute search radius based on point cloud bounds
         high = self.pos.max(dim=0).values
         low = self.pos.min(dim=0).values
         r_max = (high - low).norm()
-        neighbors, distances = knn_2(
-            self.pos,
-            self.pos[is_out],
-            k + 1,
-            r_max=r_max,
-            batch_search=self.batch,
-            batch_query=self.batch[is_out] if self.batch is not None else None)
+
+        # Move tensors to CPU if needed for stable knn computation
+        pos = self.pos
+        pos_isolated = self.pos[is_out]
+        batch = self.batch if self.batch is not None else None
+        batch_isolated = batch[is_out] if batch is not None else None
+
+        try:
+            # Try knn on current device first
+            neighbors, distances = knn_2(
+                pos, pos_isolated, k + 1,
+                r_max=r_max,
+                batch_search=batch,
+                batch_query=batch_isolated)
+        except RuntimeError:
+            # If CUDA error occurs, fall back to CPU
+            pos_cpu = pos.cpu()
+            pos_isolated_cpu = pos_isolated.cpu()
+            batch_cpu = batch.cpu() if batch is not None else None
+            batch_isolated_cpu = batch_isolated.cpu() if batch_isolated is not None else None
+            
+            neighbors, distances = knn_2(
+                pos_cpu, pos_isolated_cpu, k + 1,
+                r_max=r_max,
+                batch_search=batch_cpu,
+                batch_query=batch_isolated_cpu)
+            
+            # Move results back to original device
+            neighbors = neighbors.to(self.device)
+            distances = distances.to(self.device)
+
+        # Remove self-connections and get k nearest neighbors
         distances = distances[:, 1:]
         neighbors = neighbors[:, 1:]
 
@@ -491,35 +518,26 @@ class Data(PyGData):
         if self.edge_attr is None:
             return self
 
-        # If the edges have attributes, we also create attributes for
-        # the new edges. There is no trivial way of doing so, the
-        # heuristic here simply attempts to linearly regress the edge
-        # weights based on the corresponding node distances.
-        # First, get existing edges attributes and associated distance
+        # Handle edge attributes with CPU fallback if needed
         w = self.edge_attr
         s = edge_index_old[0]
         t = edge_index_old[1]
         d = (self.pos[s] - self.pos[t]).norm(dim=1)
         d_1 = torch.vstack((d, torch.ones_like(d))).T
 
-        # Least square on d_1.x = w  (i.e. d.a + b = w)
-        # NB: CUDA may crash trying to solve this simple system, in
-        # which case we will fall back to CPU. Not ideal though
         try:
+            # Try solving on current device
             a, b = torch.linalg.lstsq(d_1, w).solution
-        except:
-            if src.is_debug_enabled():
-                print(
-                    '\nWarning: torch.linalg.lstsq failed, trying again '
-                    'on CPU')
-            a, b = torch.linalg.lstsq(d_1.cpu(), w.cpu()).solution
+        except RuntimeError:
+            # Fall back to CPU
+            d_1_cpu = d_1.cpu()
+            w_cpu = w.cpu()
+            a, b = torch.linalg.lstsq(d_1_cpu, w_cpu).solution
             a = a.to(self.device)
             b = b.to(self.device)
 
-        # Heuristic: linear approximation of w by d
+        # Compute new edge attributes
         edge_attr_new = distances.flatten() * a + b
-
-        # Append to existing self.edge_attr
         self.edge_attr = torch.cat((self.edge_attr, edge_attr_new))
 
         return self

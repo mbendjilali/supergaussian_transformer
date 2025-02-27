@@ -19,7 +19,7 @@
 # (less diversity in the spherical samples)
 
 defaults:
-  - override /datamodule: semantic/dales.yaml
+  - override /datamodule: semantic/dales_gmm.yaml
   - override /model: semantic/spt-2.yaml
   - override /trainer: gpu.yaml
 
@@ -47,4 +47,4 @@ model:
 logger:
   wandb:
     project: "spt_dales"
-    name: "SPT-64"
+    name: "SPT-64-SGT1.1.0"

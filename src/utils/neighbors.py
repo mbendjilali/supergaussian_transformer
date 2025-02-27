@@ -465,33 +465,46 @@ def cluster_radius_nn_graph(
     edge_index = edge_index[:, ~missing_point_edge]
     distances = distances[~missing_point_edge]
 
-    # Trim the graph. This is required before computing the actual
-    # nearest points between all cluster pairs. Since this operation is
-    # so costly, we first built on a coarse neighborhood edge_index to
-    # alleviate compute and memory cost
-    if trim:
-        from src.utils import to_trimmed
-        edge_index, distances = to_trimmed(
-            edge_index, edge_attr=distances, reduce='min')
-    # Coalesce edges to remove duplicates
+    # Trim the graph and handle the case where no edges remain
+    if edge_index.shape[1] == 0:
+        # Fallback: Connect each cluster to its nearest neighbor
+        d = torch.cdist(center, center)
+        d.fill_diagonal_(float('inf'))
+        _, indices = torch.min(d, dim=1)
+        edge_index = torch.stack([torch.arange(num_clusters, device=device), indices])
+        distances = d[torch.arange(num_clusters, device=device), indices]
     else:
-        edge_index, distances = coalesce(
-            edge_index, edge_attr=distances, reduce='min')
+        if trim:
+            from src.utils import to_trimmed
+            edge_index, distances = to_trimmed(
+                edge_index, edge_attr=distances, reduce='min')
+        else:
+            edge_index, distances = coalesce(
+                edge_index, edge_attr=distances, reduce='min')
 
-    # For each cluster pair in edge_index, compute (approximately) the
-    # two closest points (coined "anchors" here). The heuristic used
-    # here to find those points runs in O(E) with E the number of
-    # edges, which is O(N) with N the number of points. This is a
-    # workaround for the actual anchor points search, which is O(N²)
-    # TODO: scatter_nearest_neighbor is the bottleneck of cluster_nn_radius(),
-    #  we could accelerate things by randomly sampling in the clusters
-    anchors = scatter_nearest_neighbor(
-        x_points, idx, edge_index, cycles=cycles, chunk_size=chunk_size)[1]
-    d_nn = (x_points[anchors[0]] - x_points[anchors[1]]).norm(dim=1)
-
-    # Trim edges wrt the anchor points distance
-    in_gap_range = d_nn <= gap
-    edge_index = edge_index[:, in_gap_range]
-    distances = d_nn[in_gap_range]
+    # Try to find anchor points between clusters
+    try:
+        anchors = scatter_nearest_neighbor(
+            x_points, idx, edge_index, cycles=cycles, chunk_size=chunk_size)[1]
+        
+        if anchors[0].numel() > 0:  # If valid anchors found
+            d_nn = (x_points[anchors[0]] - x_points[anchors[1]]).norm(dim=1)
+            # Trim edges wrt the anchor points distance
+            in_gap_range = d_nn <= gap * 1.2  # Allow slightly larger gap for stability
+            edge_index = edge_index[:, in_gap_range]
+            distances = d_nn[in_gap_range]
+        
+        # If no edges remain after anchor-based filtering
+        if edge_index.shape[1] == 0:
+            # Fallback to centroid-based connections
+            d = torch.cdist(center, center)
+            d.fill_diagonal_(float('inf'))
+            _, indices = torch.min(d, dim=1)
+            edge_index = torch.stack([torch.arange(num_clusters, device=device), indices])
+            distances = d[torch.arange(num_clusters, device=device), indices]
+            
+    except Exception as e:
+        print(f"Warning: Anchor point computation failed, using centroid distances. Error: {str(e)}")
+        # Keep the current edge_index and distances
 
     return edge_index, distances

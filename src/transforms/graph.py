@@ -13,6 +13,7 @@ from src.utils import print_tensor_info, isolated_nodes, edge_to_superedge, \
     base_vectors_3d, scatter_mean_orientation, POINT_FEATURES, \
     SEGMENT_BASE_FEATURES, SUBEDGE_FEATURES, ON_THE_FLY_HORIZONTAL_FEATURES, \
     ON_THE_FLY_VERTICAL_FEATURES, sanitize_keys
+import logging
 
 __all__ = [
     'AdjacencyGraph', 'SegmentFeatures', 'DelaunayHorizontalGraph',
@@ -842,7 +843,6 @@ def _horizontal_graph_by_radius_for_single_level(
 
     return nag
 
-
 def _minimalistic_horizontal_edge_features(
         data, points, se_point_index, se_id, keys=None):
     """Compute the features for horizontal edges, given the edge graph
@@ -851,30 +851,15 @@ def _minimalistic_horizontal_edge_features(
     The features computed here are partly based on:
     https://github.com/loicland/superpoint_graph
 
-    :param data:
-    :param points:
-    :param se_point_index:
-    :param se_id:
-    :param keys:
+    The supported feature keys are the following:
+      - mean_off: mean offset (subedges)
+      - std_off: std offset (subedges)
+      - mean_dist: mean offset (subedges) distance
+      - wasser_dist: Wasserstein distance between source and target Gaussian distributions
+        (using Cholesky factors of covariance matrices)
+      - maha_dist: Bidirectional Mahalanobis distances between source and target nodes
+        using Cholesky factors of covariance matrices
     """
-    # TODO: other superedge ideas to better describe how 2 clusters
-    #  relate and the geometry of their border (S=source, T=target):
-    #  - matrix that transforms unary_vector_source into
-    #   unary_vector_target ? Should express, differences in pose, size
-    #   and shape as it requires rotation, translation and scaling. Poses
-    #   questions regarding the canonical base, PCA orientation ±π
-    #  - current SE direction is not the axis/plane of the edge but
-    #   rather its normal... build it with PCA and for points sampled in
-    #    each side ? careful with single-point edges...
-    #  - avg distance S/T points in border to centroid S/T (how far
-    #    is the border from the cluster center)
-    #  - angle of mean S->T direction wrt S/T principal components (is
-    #    the border along the long of short side of objects ?)
-    #  - PCA of points in S/T cloud (is it linear border or surfacic
-    #    border ?)
-    #  - mean dist of S->T along S/T normal (offset along the objects
-    #    normals, e.g. offsets between steps)
-
     keys = sanitize_keys(keys, default=SUBEDGE_FEATURES)
 
     # Recover the edges between the segments
@@ -884,9 +869,9 @@ def _minimalistic_horizontal_edge_features(
         "Expects the graph to be trimmed, consider using " \
         "`src.utils.to_trimmed()` before computing the features"
 
-    if not all(['mean_off' in keys, 'std_off' in keys, 'mean_dist' in keys]):
+    if not all(['mean_off' in keys, 'std_off' in keys]):
         raise NotImplementedError(
-            "For now, 'mean_off', 'std_off' and 'mean_dist' must all be "
+            "For now, 'mean_off', 'std_off' must all be "
             "computed, since we must store them all into 'edge_attr'. Things"
             "will be different once we support custom 'edge_<key>' everywhere,"
             "but not for now.")
@@ -915,6 +900,64 @@ def _minimalistic_horizontal_edge_features(
     # Compute mean subedge distance
     se_mean_dist = scatter_mean(dist, se_id, dim=0).sqrt()
 
+    # Compute Wasserstein distance if requested
+    if 'wasser_dist' in keys:
+        # Get source and target indices for each edge
+        source_idx = data.edge_index[0]
+        target_idx = data.edge_index[1]
+        
+        # Get Gaussian parameters for source and target nodes
+        source_means = data.pos[source_idx]
+        target_means = data.pos[target_idx]
+        # L matrices are the Cholesky factors (Σ = LLᵀ)
+        # Reshape (N,6) into (N,3,3) lower triangular matrix
+        L1_flat = data.sigma[source_idx]  # Shape: (num_edges, 6)
+        L1 = torch.zeros(L1_flat.shape[0], 3, 3, device=L1_flat.device)
+        L1[:, 0, 0] = L1_flat[:, 0]  # diagonal
+        L1[:, 1, 0] = L1_flat[:, 1]  # below diagonal
+        L1[:, 1, 1] = L1_flat[:, 2]  # diagonal  
+        L1[:, 2, 0] = L1_flat[:, 3]  # below diagonal
+        L1[:, 2, 1] = L1_flat[:, 4]  # below diagonal
+        L1[:, 2, 2] = L1_flat[:, 5]  # diagonal
+        L2_flat = data.sigma[target_idx]  # Shape: (num_edges, 6)
+        L2 = torch.zeros(L2_flat.shape[0], 3, 3, device=L2_flat.device)
+        L2[:, 0, 0] = L2_flat[:, 0]  # diagonal
+        L2[:, 1, 0] = L2_flat[:, 1]  # below diagonal
+        L2[:, 1, 1] = L2_flat[:, 2]  # diagonal  
+        L2[:, 2, 0] = L2_flat[:, 3]  # below diagonal
+        L2[:, 2, 1] = L2_flat[:, 4]  # below diagonal
+        L2[:, 2, 2] = L2_flat[:, 5]  # diagonal
+        
+    # Mean term: ||μ₁ - μ₂||²
+    mean_term = torch.sum((source_means - target_means) ** 2, dim=1)
+
+    # Covariance matrices
+    C1 = L1 @ L1.transpose(1, 2)
+    C2 = L2 @ L2.transpose(1, 2)
+
+    # Compute sqrt(C2^(1/2) C1 C2^(1/2))
+    M = L2 @ (C1 @ L2)
+    eigenvalues, eigenvectors = torch.linalg.eigh(M)
+
+    # Clamp small negative eigenvalues due to numerical errors
+    eigenvalues = torch.clamp(eigenvalues, min=1e-7)
+
+    # Compute the square root of M
+    sqrt_eigenvalues = torch.sqrt(eigenvalues)
+    sqrt_M = eigenvectors @ (sqrt_eigenvalues.unsqueeze(-1) * eigenvectors.transpose(-2, -1))
+
+    # Trace term
+    cov_term = torch.einsum("...ii", C1 + C2 - 2 * sqrt_M)
+
+    # Wasserstein squared distance
+    se_wasser_dist = mean_term + cov_term
+
+    # Ensure numerical stability
+    se_wasser_dist = torch.clamp(se_wasser_dist, min=0)
+    se_wasser_dist = se_wasser_dist.view(-1, 1)
+
+    if (se_wasser_dist < 0).any():
+        raise ValueError("Wasserstein distance is negative")
     # Save superedges and superedge features in the Data object
     f = []
     if 'mean_off' in keys:
@@ -923,6 +966,8 @@ def _minimalistic_horizontal_edge_features(
         f.append(se_std_off)
     if 'mean_dist' in keys:
         f.append(se_mean_dist.view(-1, 1))
+    if 'wasser_dist' in keys:
+        f.append(se_wasser_dist)
     data.edge_index = se
     data.edge_attr = torch.cat(f, dim=1)
 
@@ -1026,6 +1071,10 @@ def _on_the_fly_horizontal_edge_features(
         assert getattr(data, 'edge_attr', None) is not None, \
             "Expected input Data to have a 'edge_attr' attribute precomputed " \
             "using `_minimalistic_horizontal_edge_features`"
+    if 'wasser_dist' in keys:
+        assert getattr(data, 'edge_attr', None) is not None, \
+            "Expected input Data to have a 'edge_attr' attribute precomputed " \
+            "using `_minimalistic_horizontal_edge_features`"
     if 'angle_source' in keys or 'angle_target' in keys:
         assert getattr(data, normal_key, None) is not None and \
                getattr(data, 'edge_attr', None) is not None, \
@@ -1060,6 +1109,14 @@ def _on_the_fly_horizontal_edge_features(
         # Precomputed edge features might be expressed in float16, so we
         # convert them to float32 here
         f = data.edge_attr[:, 6].float().view(-1, 1)
+        f_list.append(torch.cat((f, f), dim=0))
+
+    if 'wasser_dist' in keys:
+        # Precomputed edge features might be expressed in float16, so we
+        # convert them to float32 here
+        if data.edge_attr[:, 7].isnan().any():
+            raise ValueError("Wasserstein distance is NaN")
+        f = data.edge_attr[:, 7].float().view(-1, 1)
         f_list.append(torch.cat((f, f), dim=0))
 
     if 'mean_off' in keys or 'angle_source' in keys or 'angle_target' in keys:

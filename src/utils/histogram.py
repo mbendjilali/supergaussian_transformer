@@ -81,9 +81,22 @@ def atomic_to_histogram(item, idx, n_bins=None):
     hist = torch.cat((bins_before, hist), dim=1)
 
     # Append columns to the histogram for unobserved classes/bins
-    bins_after = torch.zeros(
-        N, n_bins - hist.shape[1], device=device,
-        dtype=torch.long)
+    try:
+        bins_after = torch.zeros(
+            N, n_bins - hist.shape[1], device=device,
+            dtype=torch.long)
+    except:
+        print("N:", N)
+        print("n_bins:", n_bins)
+        print("hist.shape[1]:", hist.shape[1])
+        print("device:", device)
+        print("item:", item)
+        print("idx:", idx)
+        print("offset:", offset)
+        print("in_dtype:", in_dtype)
+        print("bins_before:", bins_before)
+        print("hist:", hist)
+        raise
     hist = torch.cat((hist, bins_after), dim=1)
 
     # Restore input dtype

@@ -4,6 +4,7 @@ from src.nn import Stage, PointStage, DownNFuseStage, UpNFuseStage, \
     BatchNorm, CatFusion, MLP, LayerNorm
 from src.nn.pool import BaseAttentivePool
 from src.nn.pool import pool_factory
+import torch
 
 __all__ = ['SPT']
 
@@ -680,7 +681,12 @@ class SPT(nn.Module):
         if self.nano:
             if self.node_mlps is not None and self.node_mlps[0] is not None:
                 norm_index = nag[0].norm_index(mode=self.norm_mode)
-                nag[0].x = self.node_mlps[0](nag[0].x, batch=norm_index)
+                # Concatenate pi and sigma with other features if they exist
+                if hasattr(nag[0], 'pi') and hasattr(nag[0], 'sigma'):
+                    x = torch.cat([nag[0].x, nag[0].pi.unsqueeze(-1), nag[0].sigma], dim=-1)
+                else:
+                    x = nag[0].x
+                nag[0].x = self.node_mlps[0](x, batch=norm_index)
             if self.h_edge_mlps is not None:
                 norm_index = nag[0].norm_index(mode=self.norm_mode)
                 norm_index = norm_index[nag[0].edge_index[0]]
@@ -688,7 +694,7 @@ class SPT(nn.Module):
                     nag[0].edge_attr, batch=norm_index)
 
         # Encode level-0 data
-        x, diameter = self.first_stage(
+        out, diameter = self.first_stage(
             nag[0].x if self.use_node_hf else None,
             nag[0].norm_index(mode=self.norm_mode),
             pos=nag[0].pos,
@@ -697,6 +703,11 @@ class SPT(nn.Module):
             super_index=nag[0].super_index,
             edge_index=nag[0].edge_index,
             edge_attr=nag[0].edge_attr)
+
+        if out.isnan().any():
+            raise ValueError("x is NaN")
+        else:
+            x = out
 
         # Add the diameter to the next level's attributes
         nag[1].diameter = diameter
@@ -724,14 +735,22 @@ class SPT(nn.Module):
                 # DownNFuseStage and, later on, to the UpNFuseStage
                 if node_mlp is not None:
                     norm_index = nag[i_level].norm_index(mode=self.norm_mode)
-                    nag[i_level].x = node_mlp(nag[i_level].x, batch=norm_index)
+                    out = node_mlp(nag[i_level].x, batch=norm_index)
+                    if out.isnan().any():
+                        raise ValueError("x is NaN")
+                    else:
+                        nag[i_level].x = out
                 if h_edge_mlp is not None:
                     norm_index = nag[i_level].norm_index(mode=self.norm_mode)
                     norm_index = norm_index[nag[i_level].edge_index[0]]
                     edge_attr = getattr(nag[i_level], 'edge_attr', None)
                     if edge_attr is not None:
-                        nag[i_level].edge_attr = h_edge_mlp(
+                        out = h_edge_mlp(
                             edge_attr, batch=norm_index)
+                        if out.isnan().any():
+                            raise ValueError("edge_attr is NaN")
+                        else:
+                            nag[i_level].edge_attr = out
                 if v_edge_mlp is not None:
                     norm_index = nag[i_level - 1].norm_index(mode=self.norm_mode)
                     v_edge_attr = getattr(nag[i_level], 'v_edge_attr', None)
@@ -740,7 +759,11 @@ class SPT(nn.Module):
                             v_edge_attr, batch=norm_index)
 
                 # Forward on the DownNFuseStage
-                x, diameter = self._forward_down_stage(stage, nag, i_level, x)
+                out, diameter = self._forward_down_stage(stage, nag, i_level, x)
+                if out.isnan().any():
+                    raise ValueError("x is NaN")
+                else:
+                    x = out
                 down_outputs.append(x)
 
                 # End here if we reached the last NAG level
@@ -756,7 +779,11 @@ class SPT(nn.Module):
             for i_stage, stage in enumerate(self.up_stages):
                 i_level = self.num_down_stages - i_stage - 1
                 x_skip = down_outputs[-(2 + i_stage)]
-                x, _ = self._forward_up_stage(stage, nag, i_level, x, x_skip)
+                out, _ = self._forward_up_stage(stage, nag, i_level, x, x_skip)
+                if out.isnan().any():
+                    raise ValueError("x is NaN")
+                else:
+                    x = out
                 up_outputs.append(x)
 
         # Different types of output signatures. For stage-wise output,

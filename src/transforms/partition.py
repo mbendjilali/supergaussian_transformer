@@ -5,9 +5,11 @@ import torch
 import numpy as np
 from torch_scatter import scatter_sum, scatter_mean
 from src.transforms import Transform
+from torch_geometric.nn.pool import consecutive
 from src.data import Data, NAG, Cluster, InstanceData
 from src.utils.cpu import available_cpu_count
 from src.utils import xy_partition
+from gaussian_mixture_cpp import hierarchical_gmm
 
 dependencies_folder = osp.dirname(osp.dirname(osp.abspath(__file__)))
 sys.path.append(dependencies_folder)
@@ -17,8 +19,25 @@ sys.path.append(osp.join(dependencies_folder, "dependencies/parallel_cut_pursuit
 from grid_graph import edge_list_to_forward_star
 from cp_d0_dist import cp_d0_dist
 
-__all__ = ['CutPursuitPartition', 'GridPartition']
+__all__ = ['CutPursuitPartition', 'GridPartition', 'HierarchicalGMMPartition']
 
+
+def create_super_label_mapping_fast(label):
+    # Sort the tensor by first column to ensure we get first occurrences
+    sorted_indices = torch.argsort(label[:, 0])
+    sorted_label = label[sorted_indices]
+    
+    # Get unique values and inverse indices from first column
+    _, inverse_first = torch.unique(sorted_label[:, 0], return_inverse=True)
+    
+    # Get first occurrence of each unique value using diff
+    is_first = torch.ones_like(inverse_first, dtype=torch.bool)
+    is_first[1:] = inverse_first[1:] != inverse_first[:-1]
+    
+    # Use the first occurrences to get the corresponding values from second column
+    super_label = sorted_label[is_first, 1]
+    
+    return super_label
 
 class CutPursuitPartition(Transform):
     """Partition a graph contained in a `Data` object using cut-pursuit.
@@ -281,6 +300,108 @@ class CutPursuitPartition(Transform):
         # Create the NAG object
         nag = NAG(data_list)
 
+        return nag
+
+
+class HierarchicalGMMPartition(Transform):
+    """Partition a graph contained in a `Data` object using Bayesian Gaussian Mixture Models.
+    
+    The input `Data` object is assumed to hold the following attributes:
+      - `pos` carrying node spatial coordinates
+      - `x` carrying node features (optional)
+
+    :param num_clusters: int or List(int)
+        Number of clusters for each partition level. If a list is passed, 
+        each value represents the number of sub-clusters to create within 
+        each cluster of the previous level
+    :param alpha: float or List(float) 
+        Dirichlet concentration parameter for each level. Higher values
+        encourage more evenly-sized clusters. If a list is passed, it must 
+        match the length of `num_clusters`
+    :param tol: float or List(float)
+        Convergence tolerance for each level. If a list is passed, it must
+        match the length of `num_clusters`
+    :param max_iter: int
+        Maximum number of iterations for the BGMM algorithm
+    :param verbose: bool
+    """
+
+    _IN_TYPE = Data
+    _OUT_TYPE = NAG
+    _NO_REPR = ['verbose']
+
+    def __init__(self, num_clusters=[16, 128, 512], alpha=1.0, tol=1e-2, max_iter=100, verbose=False):
+        self.num_clusters = [num_clusters] if isinstance(num_clusters, int) else num_clusters
+        self.alpha = [alpha] * len(self.num_clusters) if isinstance(alpha, float) else alpha
+        self.tol = [tol] * len(self.num_clusters) if isinstance(tol, float) else tol
+        self.max_iter = max_iter
+        self.verbose = verbose
+
+    def _process(self, data):
+        assert data.num_nodes < np.iinfo(np.uint32).max, \
+            "Too many nodes for `uint32` indices"
+        assert isinstance(self.num_clusters, list), \
+            "Expected a list for num_clusters"
+        data_list = [data]
+        device = data.device
+        if not hasattr(data, 'node_size'):
+            data.node_size = torch.ones(data.num_nodes, device=device, dtype=torch.long)
+
+        # Prepare input features by concatenating position and optional features
+        if data.x is not None:
+            features = torch.cat((data.pos, data.x), dim=1)
+        else:
+            features = data.pos
+        # Convert hierarchy parameters to tensor
+        hierarchy_k = torch.tensor(self.num_clusters, dtype=torch.long, device=device)
+
+        all_level_labels, all_level_pi, all_level_mu, all_level_sigma = hierarchical_gmm(
+            features,
+            hierarchy_k,
+            self.alpha[0],  # Using first alpha as they should all be the same
+            self.tol[0],    # Using first tol as they should all be the same
+            self.max_iter
+        )
+        
+        # Reverse the lists since GMM returns fine-to-coarse and we want coarse-to-fine
+        all_level_labels.reverse()
+        all_level_pi.reverse()
+        all_level_mu.reverse()
+        all_level_sigma.reverse()
+
+        cat_level = torch.row_stack(all_level_labels)
+        cat_level = torch.cat([torch.arange(data.num_nodes, device = data.device).unsqueeze(0), cat_level], dim=0).T
+    
+        super_indices = [
+            create_super_label_mapping_fast(cat_level[:, i:]).unique(sorted=True, return_inverse=True)[1] for i in range(cat_level.shape[1] - 1)
+        ]
+
+        # Process each level
+        for level, (label, pi, mu, sigma) in enumerate(zip(
+            all_level_labels, all_level_pi, all_level_mu, all_level_sigma)):
+            # Update super_index of previous level
+            data_list[-1].super_index = super_indices[level]
+            node_size = scatter_sum(data_list[-1].node_size, super_indices[level], dim=0)
+            # Extract spatial coordinates and features from mu
+            if data.x is not None:
+                pos = mu[:, :data.pos.shape[1]]
+                x = mu[:, data.pos.shape[1]:]
+            else:
+                pos = mu
+                x = None 
+            cluster = Cluster.from_super_index(super_indices[level])
+            y = scatter_sum(data_list[-1].y, super_indices[level], dim=0)
+            d = Data(
+                pos=pos,
+                x=x,
+                y=y,
+                pi=pi,  # Save mixture weights
+                sigma=sigma.reshape(sigma.shape[0], -1)[:, [0, 3, 4, 6, 7, 8]],  # Save covariance diagonal
+                sub=cluster,
+                node_size=node_size,
+            )
+            data_list.append(d)
+        nag = NAG(data_list)
         return nag
 
 
