@@ -42,8 +42,8 @@ pybind11_add_module(gaussian_mixture_cpp gaussian_mixture_bindings.cpp)
 target_link_libraries(gaussian_mixture_cpp PRIVATE gmm_core ${TORCH_LIBRARIES})
 target_include_directories(gaussian_mixture_cpp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
-# Test executable
-add_executable(test_gmm test_gmm.cpp)
+# Test executable - update path
+add_executable(test_gmm tests/cpp/test_gmm.cpp)
 target_link_libraries(test_gmm PRIVATE gmm_core ${TORCH_LIBRARIES})
 target_include_directories(test_gmm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 

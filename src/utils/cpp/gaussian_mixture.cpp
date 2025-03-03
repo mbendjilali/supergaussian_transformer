@@ -156,108 +156,115 @@ namespace gmm {
             const auto options = torch::TensorOptions().device(device).dtype(torch::kFloat32);
             const auto idx_options = torch::TensorOptions().device(device).dtype(torch::kInt64);
 
+            // Increase regularization constant
+            const float reg_const = 1e-3;
+
             // Adjust K if necessary
             K = std::min(K, N);
 
-            // Hyperparameters for NIW prior
-            float beta_0 = 1.0;  // Initial sample size
-            float nu_0 = D + 2.0;  // Initial degrees of freedom
-            auto m_0 = x.mean(0);  // Prior mean
-            auto W_0 = torch::eye(D, options);  // Prior scale matrix
-            
-            // Initialize variational parameters
-            auto beta = torch::full({K}, beta_0, options);
-            auto nu = torch::full({K}, nu_0, options);
+            // Initialize model parameters
+            auto pi = torch::full({K}, alpha, options).div(K * alpha);
             
             // Initialize means by randomly selecting K points
             auto indices = torch::randperm(N, idx_options).slice(0, 0, K);
-            auto m = x.index_select(0, indices);
+            auto mu = x.index_select(0, indices);
             
-            // Initialize W (precision matrices)
-            auto W = W_0.unsqueeze(0).repeat({K, 1, 1});
-            
-            // Initialize Dirichlet parameters
-            auto alpha_k = torch::full({K}, alpha, options);
-            
+            auto sigma = torch::eye(D, options).repeat({K, 1, 1});
+
             // Pre-allocate tensors
             auto resp = torch::empty({N, K}, options);
             auto log_resp = torch::empty({N, K}, options);
-            auto prev_lb = -std::numeric_limits<float>::infinity();
-            
+            auto L_batch = torch::empty({K, D, D}, options);
+            auto log_det = torch::empty({K}, options);
+
+            // Variational parameters
+            auto beta = torch::full({K}, 1.0f, options);  // Initial precision
+            auto nu = torch::full({K}, float(D + 2), options);  // Initial degrees of freedom
+            auto W = torch::eye(D, options).repeat({K, 1, 1});  // Initial precision matrices
+
             for(int iter = 0; iter < max_iter; iter++) {
+                // Regularize covariance matrices
+                auto sigma_reg = sigma.clone();
+                for(int k = 0; k < K; k++) {
+                    sigma_reg[k].add_(torch::eye(D, options).mul(reg_const));
+                    sigma_reg[k] = (sigma_reg[k] + sigma_reg[k].transpose(-2, -1)) / 2.0;
+                    
+                    auto eigh_result = torch::linalg::eigh(sigma_reg[k], "L");
+                    auto eigenvalues = std::get<0>(eigh_result);
+                    auto min_eig = eigenvalues[0].item<float>();
+                    if (min_eig < reg_const) {
+                        sigma_reg[k].add_(torch::eye(D, options).mul(reg_const - min_eig + 1e-6));
+                    }
+                }
+
+                // Compute Cholesky decomposition
+                L_batch = torch::linalg::cholesky((sigma_reg + sigma_reg.transpose(-2, -1))/2);
+                log_det = 2 * L_batch.diagonal(0, -2, -1).log().sum(-1);
+
                 // E-step: compute responsibilities
-                auto log_pi_tilde = torch::digamma(alpha_k) - torch::digamma(alpha_k.sum());
-                auto log_det_W = torch::zeros({K}, options);
+                auto diff = x.unsqueeze(1) - mu.unsqueeze(0);  // [N, K, D]
                 
                 for(int k = 0; k < K; k++) {
-                    log_det_W[k] = torch::logdet(W[k]);
+                    auto solved = at::linalg_solve_triangular(
+                        L_batch[k], diff.select(1, k).t(),
+                        /*upper=*/false, /*transpose=*/true, /*unitriangular=*/false
+                    );
+                    auto sq_mahalanobis = solved.t().pow(2).sum(1);
+                    auto log_coeff = -0.5 * (D * std::log(2 * M_PI) + log_det[k]);
+                    
+                    // Add variational terms
+                    auto E_log_pi = torch::digamma(beta[k]) - torch::digamma(beta.sum());
+                    auto E_log_det = D * std::log(2.0) + torch::logdet(W[k]);
+                    for(int d = 0; d < D; d++) {
+                        E_log_det += torch::digamma((nu[k] - d) / 2.0);
+                    }
+                    
+                    log_resp.select(1, k) = E_log_pi + 0.5 * (E_log_det - D * std::log(2 * M_PI) - nu[k] * sq_mahalanobis);
                 }
-                
-                auto E_log_det_Lambda = D * std::log(2.0) + log_det_W;
-                for(int d = 0; d < D; d++) {
-                    E_log_det_Lambda += torch::digamma((nu - d) / 2.0);
-                }
-                
-                for(int k = 0; k < K; k++) {
-                    auto diff = x - m[k];
-                    auto E_quad = D / beta[k] + nu[k] * (diff.mm(W[k]).mul(diff)).sum(1);
-                    log_resp.select(1, k) = log_pi_tilde[k] + 0.5 * (E_log_det_Lambda[k] - D * std::log(2 * M_PI) - E_quad);
-                }
-                
+
                 // Normalize responsibilities
                 resp = torch::exp(log_resp - torch::logsumexp(log_resp, 1, true));
-                
-                // M-step: update variational parameters
+
+                // M-step: update parameters
                 auto Nk = resp.sum(0);
-                auto x_bar = resp.t().mm(x).div(Nk.unsqueeze(1));
-                
-                // Update parameters
+                auto mu_new = resp.t().mm(x).div(Nk.unsqueeze(1));
+                auto sigma_new = torch::empty_like(sigma);
+
+                // Update variational parameters
+                beta = alpha + Nk;
+                nu = float(D + 2) + Nk;
+
+                // Update covariances and precision matrices
                 for(int k = 0; k < K; k++) {
-                    // Update beta
-                    beta[k] = beta_0 + Nk[k];
+                    auto diff_k = x - mu_new[k];
+                    auto weighted_diff = diff_k * resp.select(1, k).unsqueeze(1);
+                    sigma_new[k] = diff_k.t().mm(weighted_diff) / Nk[k];
+                    sigma_new[k].add_(torch::eye(D, options).mul(reg_const));
                     
-                    // Update nu
-                    nu[k] = nu_0 + Nk[k];
-                    
-                    // Update m
-                    m[k] = (beta_0 * m_0 + Nk[k] * x_bar[k]) / beta[k];
-                    
-                    // Update W
-                    auto diff = x - x_bar[k];
-                    auto S = diff.t().mm(diff.mul(resp.select(1, k).unsqueeze(1))) / Nk[k];
-                    auto diff_means = x_bar[k] - m_0;
-                    W[k] = W_0 + Nk[k] * S + (beta_0 * Nk[k] / beta[k]) * diff_means.outer(diff_means);
+                    // Update precision matrix W
+                    W[k] = sigma_new[k].inverse().mul(nu[k]);
                 }
-                
-                // Update Dirichlet parameters
-                alpha_k = alpha + Nk;
-                
-                // Compute lower bound for convergence check
-                auto lb = torch::sum(resp.mul(log_resp));  // E[log p(Z|pi)]
-                if (std::abs(lb.item<float>() - prev_lb) < tol) {
+
+                // Check convergence
+                auto delta = (mu - mu_new).norm() + (sigma - sigma_new).norm();
+                mu = mu_new;
+                sigma = sigma_new;
+
+                if (delta.item<float>() < tol) {
                     break;
                 }
-                prev_lb = lb.item<float>();
             }
-            
-            // Compute final parameters
-            auto pi = alpha_k / alpha_k.sum();
-            auto sigma = torch::empty({K, D, D}, options);
-            for(int k = 0; k < K; k++) {
-                sigma[k] = W[k].inverse() / (nu[k] - D - 1);
-            }
-            
+
             // Compute final labels
             auto final_labels = torch::argmax(resp, 1);
             
             // Get active components
             auto active_indices = std::get<0>(at::_unique(final_labels, true));
             pi = pi.index_select(0, active_indices);
-            m = m.index_select(0, active_indices);
+            mu = mu.index_select(0, active_indices);
             sigma = sigma.index_select(0, active_indices);
-            
-            return std::make_tuple(pi, m, sigma, final_labels);
-            
+
+            return std::make_tuple(pi, mu, sigma, final_labels);
         } catch (const std::exception& e) {
             std::cerr << "Error in vbem_core: " << e.what() << std::endl;
             throw;

@@ -1,6 +1,7 @@
-from gaussian_mixture_cpp import bayesian_gaussian_mixture_model as bgmm_cpp
+from gaussian_mixture_cpp import hierarchical_gmm as gmm
+from gaussian_mixture_cpp import GMMVariant
 
-def bayesian_gaussian_mixture_model(x, K, alpha=1.0, tol=1e-2, max_iter=10):
+def bayesian_gaussian_mixture_model(x, K, alpha=1.0, tol=1e-2, max_iter=10, variant="GEM"):
     """
     Fit a Bayesian Gaussian Mixture Model to point cloud data using C++ implementation
     Args:
@@ -12,4 +13,5 @@ def bayesian_gaussian_mixture_model(x, K, alpha=1.0, tol=1e-2, max_iter=10):
     Returns:
         tuple: (pi, mu, sigma, cluster) - mixing coefficients, means, covariances, and cluster assignments
     """
-    return bgmm_cpp(x, K, alpha, tol, max_iter)
+    gmm_variant = getattr(GMMVariant, variant)
+    return gmm(x, K, alpha, tol, max_iter, gmm_variant)
