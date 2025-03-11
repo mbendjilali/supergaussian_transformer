@@ -9,17 +9,17 @@ import os.path as osp
 
 # Add necessary paths for imports
 current_dir = osp.dirname(osp.abspath(__file__))
-project_root = osp.dirname(osp.dirname(osp.dirname(current_dir)))  # Go up 3 levels to reach project root
+project_root = osp.dirname(osp.dirname(current_dir))  # Go up 2 levels to reach project root
 sys.path.append(project_root)  # Add project root to Python path
 
 # Now add dependencies paths
 dependencies_folder = osp.join(project_root, "src/dependencies")
-sys.path.append(osp.join(dependencies_folder, "grid_graph/python/bin"))
-sys.path.append(osp.join(dependencies_folder, "parallel_cut_pursuit/python/wrappers"))
+sys.path.append(osp.join(dependencies_folder, "grid_graph/python"))
+sys.path.append(osp.join(dependencies_folder, "parallel_cut_pursuit/python"))
 
 # After adding paths, import the required modules
 from grid_graph import edge_list_to_forward_star
-from cp_d0_dist import cp_d0_dist
+from cp_d0_dist_cpy import cp_d0_dist_cpy
 from src.utils.cpu import available_cpu_count
 from torch_scatter import scatter_sum, scatter_mean
 from pandarallel import pandarallel
@@ -208,7 +208,7 @@ def test_cutpursuit(
         coor_weights *= sw
 
         # Run CutPursuit
-        super_index, x_c, cluster, edges, times = cp_d0_dist(
+        super_index, x_c, cluster, edges, times = cp_d0_dist_cpy(
             n_dim,
             features,
             source_csr,
@@ -350,7 +350,7 @@ if __name__ == "__main__":
         lasdata = laspy.read(file)
         x = torch.tensor(lasdata.xyz, dtype=torch.float32, device="cpu")
         y = torch.tensor(lasdata.semantic_label.copy(), dtype=torch.int32, device="cpu")
-        rgb = torch.tensor((np.concatenate([lasdata.red, lasdata.green, lasdata.blue], axis=0) / 65535).reshape(3, -1), dtype=torch.float32, device="cpu") / 255.0  # Normalize RGB to [0,1]
+        rgb = torch.tensor((np.concatenate([lasdata.red, lasdata.green, lasdata.blue], axis=0) / 65535).reshape(3, -1).T, dtype=torch.float32, device="cpu") / 255.0  # Normalize RGB to [0,1]
         
         print("\nInput data info:")
         print(f" - Number of points: {x.shape[0]}")

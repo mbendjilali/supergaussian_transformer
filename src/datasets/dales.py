@@ -269,6 +269,17 @@ class DALES(BaseDataset):
 
         return raw_path
 
+    @property
+    def raw_file_names(self) -> List[str]:
+        """The file paths to find in order to skip the download."""
+        if self.raw_file_names_3d_dict is None:
+            self.raw_file_names_3d_dict = {
+                stage: [self.id_to_relative_raw_path(x) for x in self.all_cloud_ids[stage]]
+                for stage in self.all_cloud_ids.keys()
+            }
+        # Flatten the dictionary values into a single list
+        return [path for paths in self.raw_file_names_3d_dict.values() for path in paths]
+
 
 ########################################################################
 #                              MiniDALES                               #

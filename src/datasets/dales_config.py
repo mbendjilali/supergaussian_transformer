@@ -77,7 +77,7 @@ TILES = {
 #                                Labels                                #
 ########################################################################
 
-DALES_NUM_CLASSES = 8
+DALES_NUM_CLASSES = 9
 
 ID2TRAINID = np.asarray([8, 0, 1, 2, 3, 4, 5, 6, 7])
 

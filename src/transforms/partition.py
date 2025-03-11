@@ -9,7 +9,7 @@ from torch_geometric.nn.pool import consecutive
 from src.data import Data, NAG, Cluster, InstanceData
 from src.utils.cpu import available_cpu_count
 from src.utils import xy_partition
-from gaussian_mixture_cpp import hierarchical_gmm
+from gaussian_mixture_cpp import GMMVariant, hierarchical_gmm
 
 dependencies_folder = osp.dirname(osp.dirname(osp.abspath(__file__)))
 sys.path.append(dependencies_folder)
@@ -330,11 +330,12 @@ class HierarchicalGMMPartition(Transform):
     _OUT_TYPE = NAG
     _NO_REPR = ['verbose']
 
-    def __init__(self, num_clusters=[16, 128, 512], alpha=1.0, tol=1e-2, max_iter=100, verbose=False):
+    def __init__(self, num_clusters=[16, 128, 512], alpha=1.0, tol=1e-2, max_iter=100, variant=GMMVariant.GEM, verbose=False):
         self.num_clusters = [num_clusters] if isinstance(num_clusters, int) else num_clusters
         self.alpha = [alpha] * len(self.num_clusters) if isinstance(alpha, float) else alpha
         self.tol = [tol] * len(self.num_clusters) if isinstance(tol, float) else tol
         self.max_iter = max_iter
+        self.variant = getattr(GMMVariant, variant) if isinstance(variant, str) else variant
         self.verbose = verbose
 
     def _process(self, data):

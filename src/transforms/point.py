@@ -134,6 +134,7 @@ class PointFeatures(Transform):
         needs_geof = any((
             'linearity' in keys,
             'planarity' in keys,
+            'curvature' in keys,
             'scattering' in keys,
             'verticality' in keys,
             'normal' in keys))

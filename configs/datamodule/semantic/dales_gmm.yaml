@@ -6,7 +6,7 @@ _target_: src.datamodules.dales.DALESDataModule
 
 # These parameters are not actually used by the DataModule, but are used
 # here to facilitate model parameterization with config interpolation
-num_classes: 8
+num_classes: 9
 stuff_classes: [0, 1]
 trainval: True
 val_on_test: True
@@ -73,6 +73,7 @@ gmm_num_clusters: [96, 24, 6]  # Reduced number of clusters to prevent them from
 gmm_alpha: [10.0, 10.0, 10.0]   # Increased alpha to encourage more balanced clusters
 gmm_tol: [1e-3, 1e-3, 1e-3]  # Tighter tolerance for better convergence
 gmm_max_iter: 5            # Increased max iterations for better convergence
+gmm_variant: 'GEM'
 graph_k_min: 1
 graph_k_max: 20
 graph_gap: [20, 90, 90]  # Increased gap to allow connections between more distant clusters
@@ -165,6 +166,7 @@ pre_transform:
         alpha: ${datamodule.gmm_alpha}
         tol: ${datamodule.gmm_tol}
         max_iter: ${datamodule.gmm_max_iter}
+        variant: ${datamodule.gmm_variant}
         verbose: False
     - transform: NAGRemoveKeys  # remove 'x' used for partition (features are still preserved under their respective Data attributes)
       params:
