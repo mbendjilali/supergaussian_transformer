@@ -745,6 +745,10 @@ class BaseDataset(InMemoryDataset):
         #  that they contain no '-1' empty neighborhoods, because if
         #  you load them for batching, the pyg reindexing mechanism will
         #  break indices will not index update
+        for data in nag:
+            if data.edge_attr is not None:  
+                if (data.edge_attr == torch.inf).any():
+                    raise ValueError("Edge attribute is inf")
         nag.save(
             cloud_path,
             y_to_csr=self.save_y_to_csr,

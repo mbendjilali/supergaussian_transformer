@@ -42,21 +42,21 @@ def batch_sqrt_lower_triangular(L):
     return S
 
 
-def make_hierarchy(approx_cluster_size, depth):
+def make_hierarchy(cluster_size, depth):
     """
     Generate a hierarchy of integers whose product approximates the target cluster size.
 
     Args:
-        approx_cluster_size (int): Target cluster size to approximate
+        cluster_size (int): Target cluster size to approximate
         depth (int): Number of levels in the hierarchy
 
     Returns:
         list[int]: List of integers in descending order whose product is the nearest
-                   power of 2 less than or equal to approx_cluster_size
+                   power of 2 less than or equal to cluster_size
     """
-    # Find the nearest power of 2 less than or equal to approx_cluster_size
-    target = 2 ** (approx_cluster_size.bit_length() - 1)
-    if target > approx_cluster_size:
+    # Find the nearest power of 2 less than or equal to cluster_size
+    target = 2 ** (cluster_size.bit_length() - 1)
+    if target > cluster_size:
         target >>= 1
 
     # Find the nth root rounded down to nearest power of 2
@@ -183,8 +183,8 @@ def downsample_point_cloud(lasdata, grid_size):
         / 255.0
     )
     xyz = torch.tensor(lasdata.xyz, dtype=torch.float32, device="cpu")
-    y = torch.tensor(lasdata.sem_class.copy(), dtype=torch.long, device="cpu")
-    y = F.one_hot(y, num_classes=8)
+    y = torch.tensor(lasdata.classification.copy(), dtype=torch.long, device="cpu")
+    y = F.one_hot(y, num_classes=13)
     min_coords = xyz.min(dim=0)[0]
     v = ((xyz - min_coords) / grid_size).long()
 
@@ -208,11 +208,11 @@ def downsample_point_cloud(lasdata, grid_size):
 
     x_downsampled = torch.zeros((len(unique_ids), 3), device=xyz.device)
     rgb_downsampled = torch.zeros((len(unique_ids), 3), device=xyz.device)
-    y_downsampled = torch.zeros((len(unique_ids), 8), dtype=torch.int64, device=xyz.device)
+    y_downsampled = torch.zeros((len(unique_ids), 13), dtype=torch.int64, device=xyz.device)
     for dim in range(3):
         x_downsampled[:, dim].scatter_add_(0, inverse_indices, xyz[:, dim])
         rgb_downsampled[:, dim].scatter_add_(0, inverse_indices, rgb[:, dim])
-    for i in range(8):
+    for i in range(13):
         y_downsampled[:, i].scatter_add_(0, inverse_indices, y[:, i])
     x_downsampled /= counts.unsqueeze(1)
     rgb_downsampled /= counts.unsqueeze(1)
@@ -228,49 +228,37 @@ def test_em(
     tol,
     max_iter,
     variant,
-    over_iter,
 ):
     # Convert hierarchy_k to tensor
     hierarchy_k = torch.tensor(hierarchy_k, dtype=torch.long, device=x.device)
     results_dict = {
-        "duration": [],
-        "accuracy": [],
-        "miou": [],
-        "iterations": [],
+        "duration": 0.0,
+        "accuracy": 0.0,
+        "miou": 0.0,
+        "iterations": 0,
     }
 
-    for i in range(over_iter + 1):
-        start_time = time.time()
-        cluster, _, mu, sigma = hierarchical_gmm(
-            x, hierarchy_k, alpha, tol, max_iter + i, variant
-        )
-        duration = time.time() - start_time
-        print(f"Hierarchical GMM completed in {duration:.3f} seconds")
+    start_time = time.time()
+    cluster, _, mu, sigma = hierarchical_gmm(
+        x, hierarchy_k, alpha, tol, max_iter, variant
+    )
+    duration = time.time() - start_time
+    print(f"Duration: {duration:.3f} seconds")
 
-        start_time = time.time()
-        predictions = hard_assign(cluster[-1], y)
-        error = (predictions != y).int()
-        duration = time.time() - start_time
-        print(
-            f"Mapping labels back to original points completed in {duration:.3f} seconds"
-        )
+    predictions = hard_assign(cluster[-1], y)
+    error = (predictions != y).int()
+    accuracy = compute_mean_accuracy(predictions, y)
 
-        start_time = time.time()
-        accuracy = compute_mean_accuracy(predictions, y)
-        duration = time.time() - start_time
-        print(f"Accuracy: {accuracy:.3f} in {duration:.3f} seconds")
+    print(f"Mean class accuracy: {accuracy:.3f}")
+    miou = compute_miou(
+        predictions, y, num_classes=13
+    )  # Assuming cluster_size classes for example
+    print(f"Mean IoU: {miou:.3f}")
 
-        start_time = time.time()
-        miou = compute_miou(
-            predictions, y, num_classes=8
-        )  # Assuming 8 classes for example
-        duration = time.time() - start_time
-        print(f"mIoU: {miou:.3f} in {duration:.3f} seconds")
-
-        results_dict["duration"].append(duration)
-        results_dict["iterations"].append(max_iter + i)
-        results_dict["accuracy"].append(accuracy)
-        results_dict["miou"].append(miou)
+    results_dict["duration"] = duration
+    results_dict["iterations"] = max_iter
+    results_dict["accuracy"] = accuracy
+    results_dict["miou"] = miou
 
     return results_dict, predictions, error, cluster, mu, sigma
 
@@ -289,10 +277,10 @@ def baseline(x, y, grid_size, filename):
     """
     # Initialize results dictionary
     results_dict = {
-        "duration": [],
-        "accuracy": [],
-        "miou": [],
-        "iterations": [],
+        "duration": 0,
+        "accuracy": 0,
+        "miou": 0,
+        "iterations": 1,
         "point_count": x.shape[0],
         "filename": filename,
         "variant": "GRID",
@@ -319,17 +307,14 @@ def baseline(x, y, grid_size, filename):
     num_voxels = labels.unique().numel()
     accuracy = compute_mean_accuracy(predictions, y)
     miou = compute_miou(
-        predictions, y, num_classes=8
-    )  # Assuming 8 classes for example
-    print(
-        f"Number of non-empty voxels: {num_voxels}, Accuracy: {accuracy:.3f}, mIoU: {miou:.3f} in {duration:.3f} seconds"
-    )
+        predictions, y, num_classes=13
+    )  # Assuming 13 classes for example
 
     # Fill results dictionary
-    results_dict["duration"].append(duration)
-    results_dict["accuracy"].append(accuracy)
-    results_dict["miou"].append(miou)
-    results_dict["iterations"].append(1)  # Grid partitioning is non-iterative
+    results_dict["duration"] = duration
+    results_dict["accuracy"] = accuracy
+    results_dict["miou"] = miou
+    results_dict["iterations"] = 1  # Grid partitioning is non-iterative
     results_dict["actual_size"] = num_voxels
 
     return results_dict
@@ -397,8 +382,8 @@ def argument_parser():
 
     # Hierarchical GMM parameters
     parser.add_argument(
-        "--approx_cluster_size",
-        default="8192",
+        "--cluster_size",
+        default="cluster_size192",
         type=str,
         help="Comma-separated list of approximate cluster sizes",
     )
@@ -417,12 +402,6 @@ def argument_parser():
     # Iteration control
     parser.add_argument(
         "--max_iter", default=5, type=int, help="Maximum number of EM iterations"
-    )
-    parser.add_argument(
-        "--over_iter",
-        default=0,
-        type=int,
-        help="Number of additional iterations after convergence",
     )
 
     # Feature computation parameters
@@ -494,7 +473,7 @@ if __name__ == "__main__":
     if args.override_hk is None:
             hierarchy_ks = [
                 make_hierarchy(int(size), args.depth)
-                for size in args.approx_cluster_size.split(",")
+                for size in args.cluster_size.split(",")
             ]
     else:
         hierarchy_ks = [
@@ -515,7 +494,7 @@ if __name__ == "__main__":
         print(f"\tInput path: {source_path}")
         print(f"\tOutput path: {output_path}")
         print(f"\tDownsample grid size: {args.downsample_grid_size}")
-        print(f"\tApproximate cluster sizes: {args.approx_cluster_size}")
+        print(f"\tApproximate cluster sizes: {args.cluster_size}")
         print(f"\tHierarchy depth: {args.depth}")
         print(f"\tNumber of neighbors: {args.k_neighbors}")
         print(f"\tGMM variants: {variants}")
@@ -524,7 +503,6 @@ if __name__ == "__main__":
         print(f"\tMax iterations: {args.max_iter}")
         print(f"\tTolerance: {args.tol}")
         print(f"\tAlpha: {args.alpha}")
-        print(f"\tOver iterations: {args.over_iter}\n")
 
     for file in source_path:
         """Process a LAS file with Hierarchical GMM and save results"""
@@ -542,8 +520,9 @@ if __name__ == "__main__":
             print(y.shape)
         else:
             x = torch.tensor(lasdata.xyz, dtype=torch.float32, device="cpu")
+
             y = torch.tensor(
-                lasdata.sem_class.copy(), dtype=torch.int32, device="cpu"
+                lasdata.classification.copy(), dtype=torch.int32, device="cpu"
             )
             rgb = (
                 torch.tensor(
@@ -640,7 +619,6 @@ if __name__ == "__main__":
                 print(
                     f"\nTesting {variant} on {file} with hierarchy_k: {hierarchy_k} ({actual_size}):"
                 )
-                start_time = time.time()
                 result_dict, predictions, error, cluster, mu, sigma = test_em(
                     x=features,
                     y=y,
@@ -649,16 +627,14 @@ if __name__ == "__main__":
                     tol=args.tol,
                     max_iter=args.max_iter,
                     variant=variant,
-                    over_iter=args.over_iter,
                 )
-                duration = time.time() - start_time
-                result_dict["duration"] = duration
                 result_dict["filename"] = file
                 result_dict["point_count"] = features.shape[0]
                 result_dict["variant"] = variant.name
-                result_dict["actual_size"] = actual_size
+                result_dict["actual_size"] = cluster[-1].unique().shape[0]
                 result_dict["depth"] = args.depth
-                results_dfs.append(pd.DataFrame(result_dict))
+                print(result_dict)
+                results_dfs.append(pd.DataFrame(result_dict, index=[0]))
 
                 # Save preprocessed data as LAS file
                 preprocessed_path = Path(file).parent / f"preprocessed_{Path(file).name}"
@@ -682,10 +658,14 @@ if __name__ == "__main__":
                 preprocessed_las.classification = y.numpy()
                 preprocessed_las.add_extra_dim(laspy.ExtraBytesParams(name="predictions", type=np.int32))
                 preprocessed_las.predictions = predictions.numpy()
-                preprocessed_las.add_extra_dim(laspy.ExtraBytesParams(name="error", type=np.int8))
+                preprocessed_las.add_extra_dim(laspy.ExtraBytesParams(name="error", type=np.int32))
                 preprocessed_las.error = error.numpy()
-                preprocessed_las.add_extra_dim(laspy.ExtraBytesParams(name="clusters", type=np.int32))
-                preprocessed_las.clusters = cluster[-1].numpy()
+                preprocessed_las.add_extra_dim(laspy.ExtraBytesParams(name="cluster_0", type=np.int32))
+                preprocessed_las.cluster_0 = cluster[0].numpy()
+                preprocessed_las.add_extra_dim(laspy.ExtraBytesParams(name="cluster_1", type=np.int32))
+                preprocessed_las.cluster_1 = cluster[1].numpy()
+                preprocessed_las.add_extra_dim(laspy.ExtraBytesParams(name="cluster_2", type=np.int32))
+                preprocessed_las.cluster_2 = cluster[2].numpy()
                 
                 # Add remaining feature dimensions as extra bytes
                 for feature_name in features_names:
@@ -727,7 +707,6 @@ if __name__ == "__main__":
         # Add baseline results if grid sizes are provided
         if grid_sizes is not None:
             for grid_size in grid_sizes:
-                print(f"\nTesting baseline grid partitioning with size {grid_size}:")
                 result_dict = baseline(x, y, grid_size, file)
                 results_dfs.append(pd.DataFrame(result_dict))
 

@@ -19,9 +19,9 @@ sys.path.append(osp.join(dependencies_folder, "parallel_cut_pursuit/python"))
 
 # After adding paths, import the required modules
 from grid_graph import edge_list_to_forward_star
-from cp_d0_dist_cpy import cp_d0_dist_cpy
+from src.dependencies.parallel_cut_pursuit.python.wrappers.cp_d0_dist import cp_d0_dist
 from src.utils.cpu import available_cpu_count
-from torch_scatter import scatter_sum, scatter_mean
+from torch_scatter import scatter_sum
 from pandarallel import pandarallel
 from src.utils.neighbors import knn_1_graph
 from src.transforms.point import PointFeatures, GroundElevation
@@ -94,19 +94,21 @@ def test_cutpursuit(
     
     assert len(regularization) == len(cutoff) == len(spatial_weight), "Parameter lists must have same length"
     
+    # Initialize results dictionary with single-item lists for consistency
     results_dict = {
-        "duration": [],
-        "accuracy": [],
-        "miou": [],
-        "iterations": [],
-        "point_count": x.shape[0],
-        "filename": filename,
-        "regularization": regularization,
-        "spatial_weight": spatial_weight,
-        "cutoff": cutoff,
-        "r_max": r_max,
-        "k_neighbors": k_neighbors,
-        "hierarchy_depth": len(regularization)
+        "duration": 0.0,
+        "accuracy": 0.0,
+        "miou": 0.0,
+        "iterations": 0,
+        "point_count": 0,
+        "filename": "",
+        "regularization": 0.0,
+        "spatial_weight": 0.0,
+        "cutoff": 0,
+        "r_max": 0.0,
+        "k_neighbors": 0,
+        "hierarchy_depth": 0,
+        "num_components": 0
     }
 
     start_time = time.time()
@@ -155,8 +157,6 @@ def test_cutpursuit(
 
     # Iteratively run the partition on the previous partition level
     for level, (reg, cut, sw) in enumerate(zip(regularization, cutoff, spatial_weight)):
-        if verbose:
-            print(f'Launching partition level={level} reg={reg}, cutoff={cut}')
 
         # Recover the Data object on which we will run the partition
         d1 = data_list[level]
@@ -208,7 +208,7 @@ def test_cutpursuit(
         coor_weights *= sw
 
         # Run CutPursuit
-        super_index, x_c, cluster, edges, times = cp_d0_dist_cpy(
+        super_index, x_c, cluster, edges, times = cp_d0_dist(
             n_dim,
             features,
             source_csr,
@@ -220,7 +220,7 @@ def test_cutpursuit(
             cp_dif_tol=1e-2,
             cp_it_max=iterations,
             split_damp_ratio=0.7,
-            verbose=verbose,
+            verbose=False,
             max_num_threads=num_threads,
             balance_parallel_split=True,
             compute_Time=True,
@@ -290,23 +290,31 @@ def test_cutpursuit(
     duration = time.time() - start_time
 
     if verbose:
-        print(f"Hierarchical CutPursuit completed in {duration:.3f} seconds")
-        print(f"Number of levels: {len(data_list)}")
-        print(f"Accuracy: {accuracy:.3f}")
-        print(f"mIoU: {miou:.3f}")
+        print(f"Duration: {duration:.3f} seconds")
+        print(f"Mean class accuracy: {accuracy:.3f}")
+        print(f"Mean IoU: {miou:.3f}")
 
-    results_dict["duration"].append(duration)
-    results_dict["iterations"].append(iterations)
-    results_dict["accuracy"].append(accuracy)
-    results_dict["miou"].append(miou)
-    results_dict["num_components"] = [d.num_nodes for d in data_list]
+    # Update results dictionary with single-item lists for consistency
+    results_dict["duration"] = duration
+    results_dict["iterations"] = iterations
+    results_dict["accuracy"] = accuracy
+    results_dict["miou"] = miou
+    results_dict["point_count"] = x.shape[0]
+    results_dict["filename"] = str(filename)
+    results_dict["regularization"] = regularization[-1]  # Last regularization value
+    results_dict["spatial_weight"] = spatial_weight[-1]  # Last spatial weight value
+    results_dict["cutoff"] = cutoff[-1]  # Last cutoff value
+    results_dict["r_max"] = r_max
+    results_dict["k_neighbors"] = k_neighbors
+    results_dict["hierarchy_depth"] = len(regularization)
+    results_dict["num_components"] = data_list[1].num_nodes
 
     return results_dict
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description='Test CutPursuit partitioning')
-    parser.add_argument('--input', type=str, default="/home/moussabendjilali/test_file_area_5/3cm_grid_area_5.las", help='Input directory or path to LAS folder/file')
+    parser.add_argument('--input', type=str, help='Input directory or path to LAS folder/file')
     parser.add_argument('--output', type=str, help='Output path for results CSV file')
     parser.add_argument('--reg_list', type=str, default="30", 
                        help='Comma-separated list of regularization parameters for hierarchy')
@@ -349,7 +357,7 @@ if __name__ == "__main__":
         print(f"Loading data from {file}")
         lasdata = laspy.read(file)
         x = torch.tensor(lasdata.xyz, dtype=torch.float32, device="cpu")
-        y = torch.tensor(lasdata.semantic_label.copy(), dtype=torch.int32, device="cpu")
+        y = torch.tensor(lasdata.classification.copy(), dtype=torch.int32, device="cpu")
         rgb = torch.tensor((np.concatenate([lasdata.red, lasdata.green, lasdata.blue], axis=0) / 65535).reshape(3, -1).T, dtype=torch.float32, device="cpu") / 255.0  # Normalize RGB to [0,1]
         
         print("\nInput data info:")
