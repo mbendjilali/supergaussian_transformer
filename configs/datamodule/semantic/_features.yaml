@@ -88,6 +88,7 @@ feat_size:
     size: 1
     intensity: 1
     pi: 1  # GMM mixture weight
+    mu: 3  # GMM mean
     sigma: 6  # GMM covariance diagonal
 
     log_pos: 3

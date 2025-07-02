@@ -35,3 +35,4 @@ from .output_semantic import *
 from .widgets import *
 from .ground import *
 from .gaussian import *
+from .voxel import *

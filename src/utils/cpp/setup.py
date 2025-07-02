@@ -23,6 +23,14 @@ setup(
             ],
             extra_compile_args=extra_compile_args,
             extra_link_args=['-fopenmp'] if os.name == 'posix' else []
+        ),
+        CppExtension(
+            name="voxel_partition_cpp",
+            sources=[
+                "voxel_partition.cpp"
+            ],
+            extra_compile_args=extra_compile_args,
+            extra_link_args=['-fopenmp'] if os.name == 'posix' else []
         )
     ],
     cmdclass={

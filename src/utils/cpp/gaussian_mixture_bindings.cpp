@@ -35,5 +35,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("alpha"),
           py::arg("tol"),
           py::arg("max_iter"),
-          py::arg("variant") = gmm::GMMVariant::GEM);
+          py::arg("variant") = gmm::GMMVariant::CEM);
 } 

@@ -8,7 +8,7 @@ from src.transforms import Transform
 from torch_geometric.nn.pool import consecutive
 from src.data import Data, NAG, Cluster, InstanceData
 from src.utils.cpu import available_cpu_count
-from src.utils import xy_partition
+from src.utils import xy_partition, voxelize_points
 from gaussian_mixture_cpp import GMMVariant, hierarchical_gmm
 
 dependencies_folder = osp.dirname(osp.dirname(osp.abspath(__file__)))
@@ -19,7 +19,7 @@ sys.path.append(osp.join(dependencies_folder, "dependencies/parallel_cut_pursuit
 from grid_graph import edge_list_to_forward_star
 from cp_d0_dist import cp_d0_dist
 
-__all__ = ['CutPursuitPartition', 'GridPartition', 'HierarchicalGMMPartition']
+__all__ = ['CutPursuitPartition', 'GridPartition', 'HierarchicalGMMPartition', 'HierarchicalVoxelPartition']
 
 
 def create_super_label_mapping_fast(label):
@@ -303,6 +303,71 @@ class CutPursuitPartition(Transform):
         return nag
 
 
+class HierarchicalVoxelPartition(Transform):
+
+    _IN_TYPE = Data
+    _OUT_TYPE = NAG
+    _NO_REPR = ['verbose']
+
+    def __init__(self, voxel_sizes=[0.5, 0.1, 0.05], verbose=False):
+        self.voxel_sizes = [voxel_sizes] if isinstance(voxel_sizes, int) else voxel_sizes
+        self.verbose = verbose
+
+    def _process(self, data):
+        assert data.num_nodes < np.iinfo(np.uint32).max, \
+            "Too many nodes for `uint32` indices"
+        assert isinstance(self.voxel_sizes, list), \
+            "Expected a list for voxel_sizes"
+        data_list = [data]
+        device = data.device
+        if not hasattr(data, 'node_size'):
+            data.node_size = torch.ones(data.num_nodes, device=device, dtype=torch.long)
+
+        # Prepare input features by concatenating position and optional features
+        if data.x is not None:
+            features = torch.cat((data.pos, data.x), dim=1)
+        else:
+            features = data.pos
+
+        all_level_labels = voxelize_points(
+            features,
+            self.voxel_sizes
+        )
+
+        all_level_labels = [all_level_labels[:, i].flatten() for i in range(all_level_labels.shape[1])]
+        all_level_labels.reverse()
+
+        cat_level = torch.row_stack(all_level_labels)
+        cat_level = torch.cat([torch.arange(data.num_nodes, device = data.device).unsqueeze(0), cat_level], dim=0).T
+    
+        super_indices = [
+            create_super_label_mapping_fast(cat_level[:, i:]).unique(sorted=True, return_inverse=True)[1] for i in range(cat_level.shape[1] - 1)
+        ]
+
+        # Process each level
+        for level, label in enumerate(all_level_labels):
+            # Update super_index of previous level
+            data_list[-1].super_index = super_indices[level]
+            node_size = scatter_sum(data_list[-1].node_size, super_indices[level], dim=0)
+            # Extract spatial coordinates and features from mu
+            pos = scatter_mean(data.pos, label, dim=0)
+            if data.x is not None:
+                x = scatter_mean(data.x, label, dim=0)
+            else:
+                x = None 
+            cluster = Cluster.from_super_index(super_indices[level])
+            y = scatter_sum(data_list[-1].y, super_indices[level], dim=0)
+            d = Data(
+                pos=pos,
+                x=x,
+                y=y,
+                sub=cluster,
+                node_size=node_size,
+            )
+            data_list.append(d)
+        nag = NAG(data_list)
+        return nag
+
 class HierarchicalGMMPartition(Transform):
     """Partition a graph contained in a `Data` object using Bayesian Gaussian Mixture Models.
     
@@ -396,6 +461,7 @@ class HierarchicalGMMPartition(Transform):
                 pos=pos,
                 x=x,
                 y=y,
+                mu=mu,
                 pi=pi,  # Save mixture weights
                 sigma=sigma.reshape(sigma.shape[0], -1)[:, [0, 3, 4, 6, 7, 8]],  # Save covariance diagonal
                 sub=cluster,

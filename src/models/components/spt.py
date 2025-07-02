@@ -682,8 +682,8 @@ class SPT(nn.Module):
             if self.node_mlps is not None and self.node_mlps[0] is not None:
                 norm_index = nag[0].norm_index(mode=self.norm_mode)
                 # Concatenate pi and sigma with other features if they exist
-                if hasattr(nag[0], 'pi') and hasattr(nag[0], 'sigma'):
-                    x = torch.cat([nag[0].x, nag[0].pi.unsqueeze(-1), nag[0].sigma], dim=-1)
+                if hasattr(nag[0], 'pi') and hasattr(nag[0], 'sigma') and hasattr(nag[0], 'mu'):
+                    x = torch.cat([nag[0].x, nag[0].pi.unsqueeze(-1), nag[0].sigma, nag[0].mu.unsqueeze(-1)], dim=-1)
                 else:
                     x = nag[0].x
                 nag[0].x = self.node_mlps[0](x, batch=norm_index)

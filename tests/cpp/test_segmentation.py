@@ -82,7 +82,7 @@ def run_comparison(
             print(f"Downsampled to {x.shape[0]} points")
         else:
             x = torch.tensor(lasdata.xyz, dtype=torch.float32)
-            y = torch.tensor(lasdata.sem_class.copy(), dtype=torch.int32)
+            y = torch.tensor(lasdata.classification.copy(), dtype=torch.int32)
             rgb = torch.tensor(np.vstack([lasdata.red, lasdata.green, lasdata.blue]).T / 65535.0, 
                              dtype=torch.float32)
 

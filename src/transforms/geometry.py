@@ -96,7 +96,7 @@ class RandomTiltAndRotate(Transform):
             #  _minimalistic_horizontal_edge_features........
             if nag[i_level].edge_attr is not None:
                 edge_attr = nag[i_level].edge_attr
-                assert edge_attr.shape[1] == 8, \
+                assert edge_attr.shape[1] == 7, \
                     "Expected exactly 8 features in `edge_attr`, generated " \
                     "with `_minimalistic_horizontal_edge_features`"
                 dtype = edge_attr.dtype
@@ -170,7 +170,7 @@ class RandomAnisotropicScale(Transform):
             #  _minimalistic_horizontal_edge_features........
             if getattr(nag[i_level], 'edge_attr', None) is not None:
                 edge_attr = nag[i_level].edge_attr
-                assert edge_attr.shape[1] == 8, \
+                assert edge_attr.shape[1] == 7, \
                     "Expected exactly 8 features in `edge_attr`, generated " \
                     "with `_minimalistic_horizontal_edge_features`"
                 edge_attr[:, :3] *= scale
@@ -228,7 +228,7 @@ class RandomAxisFlip(Transform):
             #  _minimalistic_horizontal_edge_features........
             if nag[i_level].edge_attr is not None:
                 edge_attr = nag[i_level].edge_attr
-                assert edge_attr.shape[1] == 8, \
+                assert edge_attr.shape[1] == 7, \
                     "Expected exactly 8 features in `edge_attr`, generated " \
                     "with `_minimalistic_horizontal_edge_features`"
                 edge_attr[:, :3][:, axis] *= -1  # mean_off

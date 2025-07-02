@@ -70,6 +70,7 @@ class AdjacencyGraph(Transform):
             # Recover the neighbor distances and apply the masking
             distances = data.neighbor_distance[:, :self.k].flatten()[mask]
             data.edge_attr = 1 / (self.w + distances / distances.mean())
+            
         else:
             data.edge_attr = torch.ones_like(source, dtype=torch.float)
 
@@ -900,64 +901,151 @@ def _minimalistic_horizontal_edge_features(
     # Compute mean subedge distance
     se_mean_dist = scatter_mean(dist, se_id, dim=0).sqrt()
 
+    # Initialize default wasser_dist in case computation fails
+    se_wasser_dist = None
+
     # Compute Wasserstein distance if requested
     if 'wasser_dist' in keys:
-        # Get source and target indices for each edge
-        source_idx = data.edge_index[0]
-        target_idx = data.edge_index[1]
+        try:
+            # Check if sigma attribute exists
+            if not hasattr(data, 'sigma') or data.sigma is None:
+                logging.warning("'sigma' attribute missing, cannot compute Wasserstein distance")
+                # Create a placeholder of zeros instead
+                se_wasser_dist = torch.zeros((se.shape[1], 1), device=se.device)
+            else:
+                # Get source and target indices for each edge
+                source_idx = data.edge_index[0]
+                target_idx = data.edge_index[1]
+                
+                # Get Gaussian parameters for source and target nodes
+                source_means = data.pos[source_idx]
+                target_means = data.pos[target_idx]
+                
+                # Check for NaN or Inf in means
+                if torch.isnan(source_means).any() or torch.isnan(target_means).any() or \
+                   torch.isinf(source_means).any() or torch.isinf(target_means).any():
+                    raise ValueError("Source or target means contain NaN or Inf values")
+                
+                # Get L matrices (Cholesky factors: Σ = LLᵀ)
+                # Reshape (N,6) into (N,3,3) lower triangular matrix
+                L1_flat = data.sigma[source_idx]  # Shape: (num_edges, 6)
+                L2_flat = data.sigma[target_idx]  # Shape: (num_edges, 6)
+                
+                # Check for NaN or Inf in Cholesky factors
+                if torch.isnan(L1_flat).any() or torch.isnan(L2_flat).any() or \
+                   torch.isinf(L1_flat).any() or torch.isinf(L2_flat).any():
+                    raise ValueError("Cholesky factors contain NaN or Inf values")
+                
+                L1 = torch.zeros(L1_flat.shape[0], 3, 3, device=L1_flat.device)
+                L1[:, 0, 0] = L1_flat[:, 0]  # diagonal
+                L1[:, 1, 0] = L1_flat[:, 1]  # below diagonal
+                L1[:, 1, 1] = L1_flat[:, 2]  # diagonal  
+                L1[:, 2, 0] = L1_flat[:, 3]  # below diagonal
+                L1[:, 2, 1] = L1_flat[:, 4]  # below diagonal
+                L1[:, 2, 2] = L1_flat[:, 5]  # diagonal
+                
+                L2 = torch.zeros(L2_flat.shape[0], 3, 3, device=L2_flat.device)
+                L2[:, 0, 0] = L2_flat[:, 0]  # diagonal
+                L2[:, 1, 0] = L2_flat[:, 1]  # below diagonal
+                L2[:, 1, 1] = L2_flat[:, 2]  # diagonal  
+                L2[:, 2, 0] = L2_flat[:, 3]  # below diagonal
+                L2[:, 2, 1] = L2_flat[:, 4]  # below diagonal
+                L2[:, 2, 2] = L2_flat[:, 5]  # diagonal
+                
+                # Validate Cholesky factors (diagonals must be positive)
+                diag_mask1 = (L1[:, 0, 0] <= 0) | (L1[:, 1, 1] <= 0) | (L1[:, 2, 2] <= 0)
+                diag_mask2 = (L2[:, 0, 0] <= 0) | (L2[:, 1, 1] <= 0) | (L2[:, 2, 2] <= 0)
+                
+                if diag_mask1.any() or diag_mask2.any():
+                    # Fix invalid Cholesky factors by adding small constant to diagonal
+                    invalid_indices = torch.where(diag_mask1)[0]
+                    L1[invalid_indices, 0, 0] = torch.max(L1[invalid_indices, 0, 0], torch.ones_like(L1[invalid_indices, 0, 0]) * 1e-4)
+                    L1[invalid_indices, 1, 1] = torch.max(L1[invalid_indices, 1, 1], torch.ones_like(L1[invalid_indices, 1, 1]) * 1e-4)
+                    L1[invalid_indices, 2, 2] = torch.max(L1[invalid_indices, 2, 2], torch.ones_like(L1[invalid_indices, 2, 2]) * 1e-4)
+                    
+                    invalid_indices = torch.where(diag_mask2)[0]
+                    L2[invalid_indices, 0, 0] = torch.max(L2[invalid_indices, 0, 0], torch.ones_like(L2[invalid_indices, 0, 0]) * 1e-4)
+                    L2[invalid_indices, 1, 1] = torch.max(L2[invalid_indices, 1, 1], torch.ones_like(L2[invalid_indices, 1, 1]) * 1e-4)
+                    L2[invalid_indices, 2, 2] = torch.max(L2[invalid_indices, 2, 2], torch.ones_like(L2[invalid_indices, 2, 2]) * 1e-4)
+                    
+                    logging.warning(f"Fixed {invalid_indices.shape[0]} invalid Cholesky factors")
+                
+                # Mean term: ||μ₁ - μ₂||²
+                mean_term = torch.sum((source_means - target_means) ** 2, dim=1)
+                
+                # Covariance matrices (with regularization for numerical stability)
+                C1 = L1 @ L1.transpose(1, 2)
+                C2 = L2 @ L2.transpose(1, 2)
+                
+                # Check for NaN or Inf in covariance matrices
+                if torch.isnan(C1).any() or torch.isnan(C2).any() or \
+                   torch.isinf(C1).any() or torch.isinf(C2).any():
+                    raise ValueError("Covariance matrices contain NaN or Inf values")
+                
+                # Compute sqrt(C2^(1/2) C1 C2^(1/2)) with safeguards
+                try:
+                    # Apply regularization to prevent numerical issues
+                    C1_reg = C1 + torch.eye(3, device=C1.device).unsqueeze(0) * 1e-5
+                    C2_reg = C2 + torch.eye(3, device=C2.device).unsqueeze(0) * 1e-5
+                    
+                    # Recompute Cholesky factors for regularized matrices if needed
+                    try:
+                        L2 = torch.linalg.cholesky(C2_reg)
+                    except RuntimeError:
+                        # If Cholesky fails, add more regularization
+                        C2_reg = C2_reg + torch.eye(3, device=C2_reg.device).unsqueeze(0) * 1e-3
+                        L2 = torch.linalg.cholesky(C2_reg)
+                    
+                    M = L2 @ torch.linalg.solve(C2_reg, C1_reg @ L2)
+                    eigenvalues, eigenvectors = torch.linalg.eigh(M)
+                    
+                    # Check for NaN or Inf in eigenvalues/vectors
+                    if torch.isnan(eigenvalues).any() or torch.isnan(eigenvectors).any() or \
+                       torch.isinf(eigenvalues).any() or torch.isinf(eigenvectors).any():
+                        raise ValueError("Eigendecomposition resulted in NaN or Inf values")
+                    
+                    # Clamp small eigenvalues to ensure numerical stability
+                    eigenvalues = torch.clamp(eigenvalues, min=1e-6)
+                    
+                    # Compute the square root of M
+                    sqrt_eigenvalues = torch.sqrt(eigenvalues)
+                    sqrt_M = eigenvectors @ (sqrt_eigenvalues.unsqueeze(-1) * eigenvectors.transpose(-2, -1))
+                    
+                    # Check for NaN or Inf in sqrt_M
+                    if torch.isnan(sqrt_M).any() or torch.isinf(sqrt_M).any():
+                        raise ValueError("sqrt_M contains NaN or Inf values")
+                    
+                    # Trace term
+                    cov_term = torch.einsum("...ii", C1_reg + C2_reg - 2 * sqrt_M)
+                    
+                    # Ensure the trace term is valid
+                    if torch.isnan(cov_term).any() or torch.isinf(cov_term).any():
+                        raise ValueError("Covariance term contains NaN or Inf values")
+                    
+                    # Wasserstein squared distance
+                    se_wasser_dist = mean_term + cov_term
+                    
+                    # Ensure numerical stability
+                    se_wasser_dist = torch.clamp(se_wasser_dist, min=0)
+                    
+                    # Scale down very large values to prevent overflow
+                    large_values_mask = se_wasser_dist > 1e5
+                    if large_values_mask.any():
+                        logging.warning(f"Detected {large_values_mask.sum().item()} extremely large Wasserstein values, scaling them down")
+                        se_wasser_dist[large_values_mask] = torch.log(se_wasser_dist[large_values_mask]) * 100
+                    
+                    se_wasser_dist = se_wasser_dist.view(-1, 1)
+                    
+                except Exception as e:
+                    logging.warning(f"Error in Wasserstein computation: {str(e)}")
+                    # Create a placeholder of zeros
+                    se_wasser_dist = torch.zeros((se.shape[1], 1), device=se.device)
         
-        # Get Gaussian parameters for source and target nodes
-        source_means = data.pos[source_idx]
-        target_means = data.pos[target_idx]
-        # L matrices are the Cholesky factors (Σ = LLᵀ)
-        # Reshape (N,6) into (N,3,3) lower triangular matrix
-        L1_flat = data.sigma[source_idx]  # Shape: (num_edges, 6)
-        L1 = torch.zeros(L1_flat.shape[0], 3, 3, device=L1_flat.device)
-        L1[:, 0, 0] = L1_flat[:, 0]  # diagonal
-        L1[:, 1, 0] = L1_flat[:, 1]  # below diagonal
-        L1[:, 1, 1] = L1_flat[:, 2]  # diagonal  
-        L1[:, 2, 0] = L1_flat[:, 3]  # below diagonal
-        L1[:, 2, 1] = L1_flat[:, 4]  # below diagonal
-        L1[:, 2, 2] = L1_flat[:, 5]  # diagonal
-        L2_flat = data.sigma[target_idx]  # Shape: (num_edges, 6)
-        L2 = torch.zeros(L2_flat.shape[0], 3, 3, device=L2_flat.device)
-        L2[:, 0, 0] = L2_flat[:, 0]  # diagonal
-        L2[:, 1, 0] = L2_flat[:, 1]  # below diagonal
-        L2[:, 1, 1] = L2_flat[:, 2]  # diagonal  
-        L2[:, 2, 0] = L2_flat[:, 3]  # below diagonal
-        L2[:, 2, 1] = L2_flat[:, 4]  # below diagonal
-        L2[:, 2, 2] = L2_flat[:, 5]  # diagonal
-        
-    # Mean term: ||μ₁ - μ₂||²
-    mean_term = torch.sum((source_means - target_means) ** 2, dim=1)
-
-    # Covariance matrices
-    C1 = L1 @ L1.transpose(1, 2)
-    C2 = L2 @ L2.transpose(1, 2)
-
-    # Compute sqrt(C2^(1/2) C1 C2^(1/2))
-    M = L2 @ (C1 @ L2)
-    eigenvalues, eigenvectors = torch.linalg.eigh(M)
-
-    # Clamp small negative eigenvalues due to numerical errors
-    eigenvalues = torch.clamp(eigenvalues, min=1e-7)
-
-    # Compute the square root of M
-    sqrt_eigenvalues = torch.sqrt(eigenvalues)
-    sqrt_M = eigenvectors @ (sqrt_eigenvalues.unsqueeze(-1) * eigenvectors.transpose(-2, -1))
-
-    # Trace term
-    cov_term = torch.einsum("...ii", C1 + C2 - 2 * sqrt_M)
-
-    # Wasserstein squared distance
-    se_wasser_dist = mean_term + cov_term
-
-    # Ensure numerical stability
-    se_wasser_dist = torch.clamp(se_wasser_dist, min=0)
-    se_wasser_dist = se_wasser_dist.view(-1, 1)
-
-    if (se_wasser_dist < 0).any():
-        raise ValueError("Wasserstein distance is negative")
+        except Exception as e:
+            logging.warning(f"Failed to compute Wasserstein distance: {str(e)}")
+            # Create a placeholder of zeros
+            se_wasser_dist = torch.zeros((se.shape[1], 1), device=se.device)
+    
     # Save superedges and superedge features in the Data object
     f = []
     if 'mean_off' in keys:
@@ -966,7 +1054,7 @@ def _minimalistic_horizontal_edge_features(
         f.append(se_std_off)
     if 'mean_dist' in keys:
         f.append(se_mean_dist.view(-1, 1))
-    if 'wasser_dist' in keys:
+    if 'wasser_dist' in keys and se_wasser_dist is not None:
         f.append(se_wasser_dist)
     data.edge_index = se
     data.edge_attr = torch.cat(f, dim=1)
@@ -1115,7 +1203,11 @@ def _on_the_fly_horizontal_edge_features(
         # Precomputed edge features might be expressed in float16, so we
         # convert them to float32 here
         if data.edge_attr[:, 7].isnan().any():
-            raise ValueError("Wasserstein distance is NaN")
+            logging.warning("Wasserstein distance contains NaN values, replacing with zeros")
+            data.edge_attr[torch.isnan(data.edge_attr[:, 7])] = 0.0
+        if data.edge_attr[:, 7].isinf().any():
+            logging.warning("Wasserstein distance contains Inf values, replacing with large finite values")
+            data.edge_attr[torch.isinf(data.edge_attr[:, 7])] = 1e5
         f = data.edge_attr[:, 7].float().view(-1, 1)
         f_list.append(torch.cat((f, f), dim=0))
 

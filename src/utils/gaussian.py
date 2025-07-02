@@ -1,7 +1,7 @@
 from gaussian_mixture_cpp import hierarchical_gmm as gmm
 from gaussian_mixture_cpp import GMMVariant
 
-def bayesian_gaussian_mixture_model(x, K, alpha=1.0, tol=1e-2, max_iter=10, variant="GEM"):
+def bayesian_gaussian_mixture_model(x, K, alpha=1.0, tol=1e-2, max_iter=10, variant="CEM"):
     """
     Fit a Bayesian Gaussian Mixture Model to point cloud data using C++ implementation
     Args:
