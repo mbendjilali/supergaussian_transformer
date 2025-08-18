@@ -19,7 +19,7 @@
 # (less diversity in the spherical samples)
 
 defaults:
-  - override /datamodule: semantic/s3dis.yaml
+  - override /datamodule: semantic/s3dis_gmm.yaml
   - override /model: semantic/spt-2.yaml
   - override /trainer: gpu.yaml
 
@@ -27,7 +27,8 @@ defaults:
 # this allows you to overwrite only specified parameters
 
 datamodule:
-  xy_tiling: 3  # split each cloud into xy_tiling^2=9 tiles, based on a regular XY grid. Reduces preprocessing- and inference-time GPU memory
+  xy_tiling: null  # Must be null when using pc_tiling
+  pc_tiling: 2  # Reduces preprocessing- and inference-time GPU memory
   sample_graph_k: 2  # 2 spherical samples in each batch instead of 4. Reduces train-time GPU memory
 
 callbacks:
@@ -42,7 +43,7 @@ trainer:
 model:
   optimizer:
     lr: 0.1
-    weight_decay: 1e-2
+    weight_decay: 1e-3
 
 logger:
   wandb:

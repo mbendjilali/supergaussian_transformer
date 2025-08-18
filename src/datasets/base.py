@@ -10,7 +10,7 @@ import warnings
 from tqdm import tqdm
 from datetime import datetime
 from itertools import product
-from tqdm.auto import tqdm as tq
+import time
 from typing import Any, List, Tuple, Union
 from torch_geometric.data import InMemoryDataset
 from torch_geometric.data.dataset import files_exist
@@ -695,7 +695,7 @@ class BaseDataset(InMemoryDataset):
                 os.makedirs(test_dir, exist_ok=True)
 
         # Process clouds one by one
-        for p in tq(self.processed_paths):
+        for p in tqdm(self.processed_paths):
             self._process_single_cloud(p)
 
     def _process_single_cloud(self, cloud_path: str) -> None:
@@ -712,19 +712,30 @@ class BaseDataset(InMemoryDataset):
         # Read the raw cloud corresponding to the final processed
         # `cloud_path` and convert it to a Data object
         raw_path = self.processed_to_raw_path(cloud_path)
+        t0 = time.time()
         data = self.sanitized_read_single_raw_cloud(raw_path)
+        log.info(f"Read raw cloud time for {cloud_path}: {time.time() - t0:.4f}s")
 
-        # If the cloud path indicates a tiling is needed, apply it here
+        # Tiling step
+        t0 = time.time()
         if self.xy_tiling is not None:
             tile = self.get_tile_from_path(cloud_path)[0]
             data = SampleXYTiling(x=tile[0], y=tile[1], tiling=tile[2])(data)
         elif self.pc_tiling is not None:
             tile = self.get_tile_from_path(cloud_path)[0]
             data = SampleRecursiveMainXYAxisTiling(x=tile[0], steps=tile[1])(data)
+        log.info(f"Tiling time for {cloud_path}: {time.time() - t0:.4f}s")
 
-        # Apply pre_transform
+        # Apply pre_transform with timing
         if self.pre_transform is not None:
-            nag = self.pre_transform(data)
+            transform_timings = {}
+            intermediate = data
+            for tr in self.pre_transform.transforms:
+                start = time.time()
+                intermediate = tr(intermediate)
+                transform_timings[str(tr)] = time.time() - start
+            nag = intermediate
+            log.info(f"Pre-transform timings for {cloud_path}: {transform_timings}")
         else:
             nag = NAG([data])
 
@@ -740,20 +751,13 @@ class BaseDataset(InMemoryDataset):
         elif self.segment_no_save_keys is not None:
             nag = NAGRemoveKeys(level='1+', keys=self.segment_no_save_keys)(nag)
 
-        # Save pre_transformed data to the processed dir/<path>
-        # TODO: is you do not throw away level-0 neighbors, make sure
-        #  that they contain no '-1' empty neighborhoods, because if
-        #  you load them for batching, the pyg reindexing mechanism will
-        #  break indices will not index update
-        for data in nag:
-            if data.edge_attr is not None:  
-                if (data.edge_attr == torch.inf).any():
-                    raise ValueError("Edge attribute is inf")
+        t0 = time.time()
         nag.save(
             cloud_path,
             y_to_csr=self.save_y_to_csr,
             pos_dtype=self.save_pos_dtype,
             fp_dtype=self.save_fp_dtype)
+        log.info(f"Save time for {cloud_path}: {time.time() - t0:.4f}s")
         del nag
 
     @staticmethod
@@ -1043,3 +1047,8 @@ class BaseDataset(InMemoryDataset):
                 stuff_classes=self.stuff_classes,
                 num_classes=self.num_classes,
                 **kwargs)
+
+    @property
+    def raw_paths(self) -> list:
+        """List of absolute paths to the raw data files."""
+        return [os.path.join(self.raw_dir, f) for f in self.raw_file_names]

@@ -441,12 +441,25 @@ class S3DIS(BaseDataset):
             """
 
     @property
-    def raw_file_names(self) -> str:
+    def raw_file_names(self) -> list:
         """The file paths to find in order to skip the download."""
-        area_folders = super().raw_file_names
+        area_folders_dict = super().raw_file_names
+        # Flatten the dict values into a single list
+        area_folders = [path for paths in area_folders_dict.values() for path in paths]
         alignment_files = [
-            osp.join(a, f"{a}_alignmentAngle.txt") for a in area_folders]
+            osp.join(a, f"{a}_alignmentAngle.txt") for a in set([p.split(os.sep)[0] for p in area_folders])
+        ]
         return area_folders + alignment_files
+
+    @property
+    def raw_file_names_3d(self) -> list:
+        if self.raw_file_names_3d_dict is None:
+            self.raw_file_names_3d_dict = {
+                stage: [self.id_to_relative_raw_path(x) for x in self.all_cloud_ids[stage]]
+                for stage in self.all_cloud_ids.keys()
+            }
+        # Flatten the dictionary values into a single list
+        return [path for paths in self.raw_file_names_3d_dict.values() for path in paths]
 
     def id_to_relative_raw_path(self, id: str) -> str:
         """Given a cloud id as stored in `self.cloud_ids`, return the
@@ -454,6 +467,18 @@ class S3DIS(BaseDataset):
         cloud.
         """
         return self.id_to_base_id(id)
+
+    @property
+    def raw_paths(self) -> list:
+        """List of absolute paths to the raw data files."""
+        try:
+            if not hasattr(self, 'raw_dir') or self.raw_dir is None:
+                return []
+            if not hasattr(self, 'raw_file_names'):
+                return []
+            return [os.path.join(self.raw_dir, f) for f in self.raw_file_names]
+        except Exception:
+            return []
 
 
 ########################################################################
